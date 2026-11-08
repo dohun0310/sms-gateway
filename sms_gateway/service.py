@@ -25,11 +25,14 @@ async def run(cfg: config_mod.Config) -> None:
     log.info("listening on %s; emergency forwarding %s", cfg.socket_path,
              "enabled" if cfg.emergency else "disabled")
 
+    # Receiving runs on every tick. Sending runs as its own task, so a modem that is slow to
+    # send never stops new messages, including emergencies, from being recorded.
+    dispatcher: asyncio.Task | None = None
     last_error = None
     async with server:
         while True:
             try:
-                await api.poll_under_lock()
+                await gateway.record_received()
                 if last_error:
                     log.info("modem available again")
                 last_error = None
@@ -37,6 +40,11 @@ async def run(cfg: config_mod.Config) -> None:
                 if str(exc) != last_error:  # log each distinct failure once
                     log.error("poll failed: %s", exc)
                 last_error = str(exc)
+
+            if dispatcher is None or dispatcher.done():
+                if dispatcher is not None and not dispatcher.cancelled() and dispatcher.exception():
+                    log.error("dispatch failed: %s", dispatcher.exception())
+                dispatcher = asyncio.create_task(gateway.dispatch())
             await asyncio.sleep(cfg.poll_interval)
 
 

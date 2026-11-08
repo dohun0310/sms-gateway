@@ -10,7 +10,7 @@ from sms_gateway.api import Api
 from sms_gateway.client import call
 from sms_gateway.config import Contact, EmergencyConfig
 from sms_gateway.gateway import Gateway, RequestError
-from sms_gateway.modem import ModemError, ReceivedSms
+from sms_gateway.modem import ModemError, NotSent, ReceivedSms, SendTimeout
 from sms_gateway.store import Store
 
 PASS = "블루베리42"
@@ -21,11 +21,14 @@ class FakeModem:
         self.inbox: list[ReceivedSms] = []
         self.sent: list[tuple[str, str]] = []
         self.fail_for: set[str] = set()
+        self.raise_for: dict[str, Exception] = {}
 
     async def received(self):
         return list(self.inbox)
 
     async def send(self, number, text):
+        if number in self.raise_for:
+            raise self.raise_for[number]
         if number in self.fail_for:
             raise ModemError("rejected")
         self.sent.append((number, text))
@@ -189,6 +192,68 @@ async def test_emergency_rows_cannot_be_sent_through_api(tmp_path):
     failed = store._db.execute("SELECT id FROM outbound WHERE state = 'failed'").fetchone()[0]
     with pytest.raises(RequestError):
         await gw.send_draft(failed)
+
+
+# slow or missing modem
+
+async def test_timed_out_send_is_unknown_and_not_retried(tmp_path):
+    gw, store, modem = make(tmp_path, reply=False)
+    modem.raise_for = {"01011112222": SendTimeout("Send: no answer within 60s")}
+    modem.inbox = [sms(f"{PASS} 도와줘")]
+    await gw.poll()
+    modem.raise_for = {}
+    await gw.poll()
+    assert [n for n, _ in modem.sent] == ["01033334444"]
+    states = dict(store._db.execute("SELECT number, state FROM outbound").fetchall())
+    assert states["01011112222"] == "unknown"
+
+
+async def test_forward_waits_for_modem_and_is_sent_later(tmp_path):
+    gw, store, modem = make(tmp_path)
+    absent = NotSent("no modem with SMS support")
+    modem.raise_for = {n: absent for n in ("01011112222", "01033334444", "01099998888")}
+    modem.inbox = [sms(f"{PASS} 도와줘")]
+    await gw.poll()
+    assert modem.sent == []
+
+    modem.raise_for = {}  # modem is back
+    await gw.poll()
+    assert [n for n, _ in modem.sent] == ["01011112222", "01033334444", "01099998888"]
+    assert modem.sent[2][1] == "긴급 요청을 지정 연락처 2명 중 2명에게 전송했습니다."
+
+
+async def test_receiving_continues_while_a_send_hangs(tmp_path):
+    gw, store, modem = make(tmp_path, reply=False)
+    release = asyncio.Event()
+    original_send = modem.send
+
+    async def slow_send(number, text):
+        await release.wait()
+        await original_send(number, text)
+
+    modem.send = slow_send
+    modem.inbox = [sms(f"{PASS} 첫번째", ts="t1")]
+    await gw.record_received()
+    dispatch = asyncio.create_task(gw.dispatch())
+    await asyncio.sleep(0)  # dispatch is now stuck in the first send
+
+    modem.inbox.append(sms("새 문자", ts="t2"))
+    await gw.record_received()
+    assert "새 문자" in [m.text for m in gw.inbox()]
+
+    release.set()
+    await dispatch
+    assert len(modem.sent) == 2
+
+
+async def test_draft_not_handed_to_network_can_be_sent_again(tmp_path):
+    gw, store, modem = make(tmp_path)
+    modem.raise_for = {"01012345678": NotSent("no modem with SMS support")}
+    draft = gw.create_draft("01012345678", "hi")
+    assert (await gw.send_draft(draft.id)).state == "draft"
+    modem.raise_for = {}
+    assert (await gw.send_draft(draft.id)).state == "sent"
+    assert modem.sent == [("01012345678", "hi")]
 
 
 # socket API

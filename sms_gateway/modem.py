@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -16,9 +17,24 @@ SMS = "org.freedesktop.ModemManager1.Sms"
 SMS_STATE_RECEIVED = 3
 SMS_PDU_DELIVER = 1
 
+CALL_TIMEOUT = 30.0
+SEND_TIMEOUT = 60.0
+
 
 class ModemError(RuntimeError):
-    pass
+    """The modem refused or failed an operation."""
+
+
+class CallTimeout(ModemError):
+    """ModemManager did not answer a D-Bus call in time."""
+
+
+class NotSent(ModemError):
+    """Failed before the message was handed to the network; safe to try again."""
+
+
+class SendTimeout(ModemError):
+    """No answer to Send in time; the message may or may not have gone out."""
 
 
 @dataclass(frozen=True)
@@ -31,7 +47,9 @@ class ReceivedSms:
 class Modem(Protocol):
     async def received(self) -> list[ReceivedSms]: ...
 
-    async def send(self, number: str, text: str) -> None: ...
+    async def send(self, number: str, text: str) -> None:
+        """Raises NotSent, SendTimeout, or ModemError when the network rejected the message."""
+        ...
 
 
 class ModemManagerModem:
@@ -46,12 +64,15 @@ class ModemManagerModem:
             self._bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
         return self._bus
 
-    async def _call(self, path: str, interface: str, member: str, signature: str = "", body=()):
+    async def _call(self, path: str, interface: str, member: str, signature: str = "", body=(),
+                    timeout: float = CALL_TIMEOUT):
         bus = await self._connection()
-        reply = await bus.call(
-            Message(destination=MM, path=path, interface=interface, member=member,
-                    signature=signature, body=list(body))
-        )
+        message = Message(destination=MM, path=path, interface=interface, member=member,
+                          signature=signature, body=list(body))
+        try:
+            reply = await asyncio.wait_for(bus.call(message), timeout)
+        except TimeoutError:
+            raise CallTimeout(f"{member}: no answer within {timeout:.0f}s") from None
         if reply.message_type == MessageType.ERROR:
             raise ModemError(f"{member}: {reply.error_name}: {reply.body[0] if reply.body else ''}")
         return reply.body
@@ -81,15 +102,27 @@ class ModemManagerModem:
         return result
 
     async def send(self, number: str, text: str) -> None:
-        modem = await self._modem_path()
-        (path,) = await self._call(
-            modem, MESSAGING, "Create", "a{sv}",
-            [{"number": Variant("s", number), "text": Variant("s", text)}],
-        )
         try:
-            await self._call(path, SMS, "Send")
-        finally:
-            try:
-                await self._call(modem, MESSAGING, "Delete", "o", [path])
-            except ModemError:
-                pass  # the outgoing copy is only kept in ModemManager's memory
+            modem = await self._modem_path()
+            (path,) = await self._call(
+                modem, MESSAGING, "Create", "a{sv}",
+                [{"number": Variant("s", number), "text": Variant("s", text)}],
+            )
+        except (ModemError, OSError) as exc:
+            raise NotSent(str(exc)) from exc
+
+        try:
+            await self._call(path, SMS, "Send", timeout=SEND_TIMEOUT)
+        except CallTimeout as exc:
+            # ModemManager still owns the message and may finish sending it; leave it alone.
+            raise SendTimeout(str(exc)) from exc
+        except ModemError as exc:
+            await self._delete(modem, path)
+            raise
+        await self._delete(modem, path)
+
+    async def _delete(self, modem: str, path: str) -> None:
+        try:
+            await self._call(modem, MESSAGING, "Delete", "o", [path])
+        except ModemError:
+            pass  # the outgoing copy is only kept in ModemManager's memory

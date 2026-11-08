@@ -29,7 +29,6 @@ class Api:
     def __init__(self, gateway: Gateway, allowed_uids: frozenset[int]):
         self._gateway = gateway
         self._allowed = allowed_uids
-        self._lock = asyncio.Lock()  # one modem operation at a time
 
     async def handle(self, request: dict) -> object:
         method, params = request.get("method"), request.get("params") or {}
@@ -43,8 +42,7 @@ class Api:
             case "get":
                 return asdict(self._gateway.get(str(params["id"])))
             case "send":
-                async with self._lock:
-                    return asdict(await self._gateway.send_draft(str(params["id"])))
+                return asdict(await self._gateway.send_draft(str(params["id"])))
             case _:
                 raise RequestError(f"unknown method: {method}")
 
@@ -68,7 +66,3 @@ class Api:
         server = await asyncio.start_unix_server(self._client, path=str(path), limit=MAX_REQUEST + 1)
         os.chmod(path, 0o666)  # access is decided by the uid check, not file mode
         return server
-
-    async def poll_under_lock(self) -> None:
-        async with self._lock:
-            await self._gateway.poll()

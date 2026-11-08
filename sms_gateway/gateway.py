@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 from . import emergency
 from .config import EmergencyConfig, validate_number
-from .modem import Modem, ModemError, ReceivedSms
+from .modem import Modem, ModemError, NotSent, ReceivedSms, SendTimeout
 from .store import Inbound, Outbound, Store, inbound_key
 
 log = logging.getLogger(__name__)
@@ -37,9 +37,13 @@ class Gateway:
     # receiving
 
     async def poll(self) -> None:
+        """Record new messages, then send whatever is pending."""
+        await self.record_received()
+        await self.dispatch()
+
+    async def record_received(self) -> None:
         for sms in await self._modem.received():
             self._record(sms)
-        await self._dispatch()
 
     def _record(self, sms: ReceivedSms) -> None:
         key = inbound_key(sms.number, sms.timestamp, sms.text)
@@ -63,7 +67,8 @@ class Gateway:
         if self._store.add_inbound(msg, forwards):
             log.info("received %s message from %s", kind, mask(sms.number))
 
-    async def _dispatch(self) -> None:
+    async def dispatch(self) -> None:
+        """Send pending emergency forwards and replies. Run one dispatch at a time."""
         for out in self._store.pending_outbound():
             await self._send(out, from_state="pending")
 
@@ -82,6 +87,12 @@ class Gateway:
             return current
         try:
             await self._modem.send(out.number, out.text)
+        except NotSent as exc:
+            self._store.transition(out.id, "sending", from_state, str(exc))  # nothing went out; try later
+            log.warning("%s %s to %s not sent yet: %s", out.kind, out.id, mask(out.number), exc)
+        except SendTimeout as exc:
+            self._store.transition(out.id, "sending", "unknown", str(exc))
+            log.error("%s %s to %s: outcome unknown: %s", out.kind, out.id, mask(out.number), exc)
         except ModemError as exc:
             self._store.transition(out.id, "sending", "failed", str(exc))
             log.error("%s %s to %s failed: %s", out.kind, out.id, mask(out.number), exc)
