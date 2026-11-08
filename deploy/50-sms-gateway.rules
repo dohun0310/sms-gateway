@@ -1,0 +1,8 @@
+// Let the sms-gateway service account create, send and delete SMS through ModemManager.
+// Other ModemManager actions (device control, voice, firmware...) are not granted.
+polkit.addRule(function (action, subject) {
+    if (action.id == "org.freedesktop.ModemManager1.Messaging" &&
+        subject.user == "sms-gateway") {
+        return polkit.Result.YES;
+    }
+});

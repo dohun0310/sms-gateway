@@ -1,0 +1,42 @@
+[Unit]
+Description=SMS gateway (ModemManager): emergency forwarding and local send API
+After=ModemManager.service dbus.service
+Wants=ModemManager.service
+
+[Service]
+Type=simple
+User=sms-gateway
+Group=sms-gateway
+ExecStart=/opt/sms-gateway/venv/bin/sms-gateway --config /etc/sms-gateway/config.toml
+Restart=always
+RestartSec=5
+
+StateDirectory=sms-gateway
+StateDirectoryMode=0700
+RuntimeDirectory=sms-gateway
+RuntimeDirectoryMode=0755
+UMask=0077
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

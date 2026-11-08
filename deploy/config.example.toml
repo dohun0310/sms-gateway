@@ -1,0 +1,26 @@
+# /etc/sms-gateway/config.toml  (root:sms-gateway, 0640)
+
+# Local users allowed to use the API socket (`id -u`).
+allowed_uids = [1000]
+
+# database_path = "/var/lib/sms-gateway/sms.db"
+# socket_path = "/run/sms-gateway/sms.sock"
+# poll_interval = 5.0
+
+[emergency]
+# A message that starts with this word, followed by a space or a new line, is an emergency request.
+# At least 6 characters, no spaces. Choose something you will remember without your phone.
+passphrase = "CHANGE-ME"
+
+# Introduction at the top of the forwarded message, so contacts know who sent it and why.
+intro = "홍길동의 긴급 요청 전달 서비스입니다. 홍길동이 다른 번호로 보낸 요청을 전달합니다."
+
+# Tell the sender how many contacts the request reached.
+reply_to_requester = true
+
+# Requests beyond this count within one hour are recorded but not forwarded.
+max_requests_per_hour = 3
+
+contacts = [
+    { name = "이름", number = "01000000000" },
+]
